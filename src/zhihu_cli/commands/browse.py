@@ -25,6 +25,12 @@ from zhihu_cli.content.handlers.following import (
     fetch_following_topics,
 )
 from zhihu_cli.content.handlers.hot import fetch_hot_list
+from zhihu_cli.content.handlers.public_answer import (
+    EXIT_INVALID_INPUT,
+    canonicalize_answer_url,
+    invalid_url_result,
+    read_public_answer_api,
+)
 from zhihu_cli.content.handlers.question import scrape_answer_page, scrape_answers, scrape_question_data
 from zhihu_cli.content.handlers.question_log import fetch_question_log
 from zhihu_cli.content.handlers.segment_comments import fetch_segment_comments
@@ -130,9 +136,63 @@ def register_browse(main_group):
     @click.argument("url")
     @click.option("--reading-mode/--no-reading-mode", default=True, help="Use Rich pager for reading")
     @click.option("--json", "output_json", is_flag=True, default=False, help="Output as JSON")
-    def browse_answer(url: str, reading_mode: bool, output_json: bool) -> None:
+    @click.option("--api", "api_mode", is_flag=True, default=False, help="Use the safe answer-detail API reader")
+    @click.option("--metadata-only", is_flag=True, default=False, help="Omit answer body from API JSON output")
+    @click.option(
+        "--allow-anonymous",
+        is_flag=True,
+        default=False,
+        help="Permit one API request without an active profile",
+    )
+    def browse_answer(
+        url: str,
+        reading_mode: bool,
+        output_json: bool,
+        api_mode: bool,
+        metadata_only: bool,
+        allow_anonymous: bool,
+    ) -> None:
         """View a single Zhihu answer in the terminal."""
-        metadata, markdown = scrape_answer_page(url)
+        set_json_mode(output_json)
+        if (metadata_only or allow_anonymous) and not api_mode:
+            raise click.UsageError("--metadata-only and --allow-anonymous require --api")
+
+        if api_mode:
+            try:
+                canonicalize_answer_url(url)
+            except ValueError as exc:
+                result = invalid_url_result(url, str(exc))
+                if output_json:
+                    print_json(result)
+                else:
+                    error(result["reason"])
+                raise click.exceptions.Exit(EXIT_INVALID_INPUT) from exc
+
+            result, exit_code = read_public_answer_api(
+                url,
+                metadata_only=metadata_only,
+                allow_anonymous=allow_anonymous,
+            )
+            if output_json:
+                print_json(result)
+            elif exit_code:
+                error(result["reason"])
+            if exit_code:
+                raise click.exceptions.Exit(exit_code)
+            if output_json:
+                return
+
+            metadata = {
+                "title": result.get("question_title", "untitled"),
+                "author": result.get("author_name", "unknown"),
+                "created": fmt_time(result.get("created_time")),
+                "vote": result.get("voteup_count", 0),
+                "comment": result.get("comment_count", 0),
+                "favorite": result.get("favlists_count", 0),
+            }
+            markdown = result.get("content_md", "")
+        else:
+            metadata, markdown = scrape_answer_page(url)
 
         if output_json:
             print_json({"metadata": metadata, "content_md": markdown})

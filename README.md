@@ -69,6 +69,15 @@ zhihu-cli auth status         # full grouped command remains available
 
 Browse Zhihu's feeds, hot lists, questions, articles, pins, and comments — all rendered in your terminal with a Rich-powered pager. Explore the real-time trending list with excerpts, scroll through your personalized recommend feed, or dive into a question and its full answer thread without clicking a single link.
 
+For automation that needs explicit completeness and access-control evidence, use the safe answer-detail API mode:
+
+```bash
+zhihu-cli answer "https://www.zhihu.com/question/123/answer/456" --api --json
+zhihu-cli answer "https://www.zhihu.com/question/123/answer/456?utm_source=x" --api --json --metadata-only
+```
+
+API mode canonicalizes the URL, stops before networking when no profile is active, sends at most one request, disables automatic captcha retries, and succeeds only for HTTP 200 JSON containing the matching answer ID and non-empty content. `--allow-anonymous` permits one explicit compatibility probe; it does not bypass login, captcha, or risk control.
+
 ### 💾 Download for Offline
 
 Save any Zhihu content (articles, answers, questions, pins, videos) as clean Markdown with YAML frontmatter. Download individual pieces or batch-process from a manifest. Everything lands in `~/.zhihu-cli/downloads/`, organized by type, ready for your note-taking system or offline reading.

@@ -40,7 +40,7 @@ def _configure_standard_streams() -> None:
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="zhihu-cli")
+@click.version_option(version="0.2.1", prog_name="zhihu-cli")
 def main() -> None:
     """zhihu-cli — Zhihu scraping, automation, and analysis toolkit.
 
