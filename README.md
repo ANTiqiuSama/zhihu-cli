@@ -42,8 +42,9 @@ python -m pip install ".[classifier]"   # ML-powered content classification
 ### 1. Authenticate
 
 ```bash
-zhihu-cli login --qrcode      # QR PNG is saved to ~/.zhihu-cli/login_qrcode.png
-zhihu-cli login --cookie "…"  # import a browser Cookie header directly
+zhihu-cli login --qrcode --browser auto  # follows the configured/default browser (Edge on Windows when selected)
+zhihu-cli login --qrcode --browser edge  # explicitly align QR login and verification with Microsoft Edge
+zhihu-cli login --cookie "…" --browser edge  # keep imported credentials aligned with Edge
 zhihu-cli auth paste          # paste a full cURL from browser DevTools
 ```
 

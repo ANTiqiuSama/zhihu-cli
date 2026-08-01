@@ -61,6 +61,13 @@ def register_compat(main_group: click.Group) -> None:
         help="Save the QR image to this path",
     )
     @click.option("--open-browser/--no-browser", default=True, help="Open risk-control verification in a browser")
+    @click.option(
+        "--browser",
+        type=click.Choice(["auto", "edge", "chrome"], case_sensitive=False),
+        default="auto",
+        show_default=True,
+        help="Browser identity and verification-page target",
+    )
     @click.pass_context
     def login_alias(
         context: click.Context,
@@ -69,11 +76,12 @@ def register_compat(main_group: click.Group) -> None:
         profile_name: str | None,
         qr_path: str | None,
         open_browser: bool,
+        browser: str,
     ) -> object:
         """Authenticate using a QR code or Cookie text."""
         del qrcode  # QR is the default mode and the flag is retained for compatibility.
         if cookie_text:
-            args = ["--cookie", cookie_text]
+            args = ["--cookie", cookie_text, "--browser", browser]
             if profile_name:
                 args.extend(["--profile", profile_name])
             return _forward(main_group, context, ("auth", "cookie"), args)
@@ -83,6 +91,7 @@ def register_compat(main_group: click.Group) -> None:
             args.extend(["--profile", profile_name])
         if qr_path:
             args.extend(["--qr-path", qr_path])
+        args.extend(["--browser", browser])
         args.append("--open-browser" if open_browser else "--no-browser")
         return _forward(main_group, context, ("auth", "login"), args)
 
