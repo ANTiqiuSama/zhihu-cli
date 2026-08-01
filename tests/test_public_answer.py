@@ -155,6 +155,29 @@ def test_risk_control_is_a_hard_stop_without_retry():
     assert len(session.calls) == 1
 
 
+def test_abnormal_access_restriction_is_classified_as_risk_control():
+    session = FakeSession(
+        FakeResponse(
+            403,
+            {
+                "error": {
+                    "code": 40362,
+                    "message": "abnormal request temporarily restricted",
+                    "need_login": False,
+                }
+            },
+        )
+    )
+
+    result, exit_code = read_public_answer_api(ANSWER_URL, http_session=session, active_profile="research")
+
+    assert exit_code == EXIT_BLOCKED
+    assert result["status"] == "blocked_human_verification"
+    assert result["error_code"] == 40362
+    assert result["need_login"] is False
+    assert len(session.calls) == 1
+
+
 @pytest.mark.parametrize(
     ("payload", "reason_fragment"),
     [

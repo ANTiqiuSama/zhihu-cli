@@ -66,7 +66,9 @@ def _error_details(payload: Any) -> tuple[Any, bool, str]:
 
 
 def _is_human_verification(error_code: Any, message: str) -> bool:
-    return str(error_code) == "40352" or bool(re.search(r"captcha|verification|risk", message, re.IGNORECASE))
+    return str(error_code) in {"40352", "40362"} or bool(
+        re.search(r"captcha|verification|risk", message, re.IGNORECASE)
+    )
 
 
 def read_public_answer_api(
