@@ -37,6 +37,7 @@ ME_URL = "https://www.zhihu.com/api/v4/me"
 HOME_URL = "https://www.zhihu.com/"
 RISK_CONTROL_FALLBACK = "https://www.zhihu.com/account/risk_control/"
 DEFAULT_QR_PATH = Path.home() / ".zhihu-cli" / "login_qrcode.png"
+MAX_RISK_CONTROL_CHALLENGES = 1
 
 RISK_CONTROL_EXIT = object()
 
@@ -215,6 +216,12 @@ def _prompt_risk_control_verification(
     browser: str = "auto",
 ) -> None:
     """Prompt the user to complete browser verification, then refresh session cookies."""
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Interactive Zhihu verification is required. Re-run 'zhihu-cli auth login' "
+            "in a user-visible terminal; no verification page was opened."
+        )
+
     print()
     print("=" * 60)
     print("  ⚠️  Zhihu needs to verify your network environment.")
@@ -297,12 +304,13 @@ def _handle_risk_control(
         (1-indexed).
     :returns: ``(token, link, deadline)`` if a fresh QR was obtained, or
         ``None``.
-    :raises RuntimeError: If ``risk_control_count > 3``.
+    :raises RuntimeError: If more than one risk-control challenge is encountered.
     """
-    if risk_control_count > 3:
+    if risk_control_count > MAX_RISK_CONTROL_CHALLENGES:
         raise RuntimeError(
-            "Too many risk-control challenges. Zhihu is throttling this network. "
-            "Try again later or use 'zhihu auth paste' instead."
+            "Zhihu risk control remained active after one human verification. "
+            "Stopping without another retry; try again later or use user-supplied "
+            "browser DevTools cURL with 'zhihu auth paste'."
         )
 
     _prompt_risk_control_verification(session, risk_url, open_browser=open_browser, browser=browser)
@@ -359,8 +367,10 @@ def qr_login(
     data = resp.json()
 
     # Check for risk control before QR code is issued
+    risk_control_count = 0
     risk_url = _detect_risk_control(data)
     if risk_url:
+        risk_control_count += 1
         _prompt_risk_control_verification(session, risk_url, open_browser=open_browser, browser=browser)
         resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
         if resp.status_code != 200:
@@ -388,7 +398,6 @@ def qr_login(
 
     print("Waiting for scan...")
     scanned_reported = False
-    risk_control_count = 0
     last_poll_error: Exception | None = None
 
     while time.time() < deadline:

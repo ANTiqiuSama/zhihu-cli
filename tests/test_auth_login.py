@@ -15,8 +15,10 @@ from zhihu_cli.content.handlers.auth_login import (
     _browser_identity,
     _desktop_headers,
     _detect_risk_control,
+    _handle_risk_control,
     _is_login_success,
     _print_qr,
+    _prompt_risk_control_verification,
     _resolve_browser,
     _resolve_qr_path,
 )
@@ -121,3 +123,32 @@ def test_cookie_import_persists_explicit_edge_identity(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "Edg/" in saved["User-Agent"]
+
+
+def test_noninteractive_risk_control_stops_before_opening_browser(monkeypatch):
+    opened = []
+    monkeypatch.setattr(auth_login.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(auth_login, "_open_browser_url", lambda url, browser: opened.append(url))
+
+    with pytest.raises(RuntimeError, match="user-visible terminal"):
+        _prompt_risk_control_verification(object(), "https://www.zhihu.com/account/unhuman?session=test")
+
+    assert opened == []
+
+
+def test_second_risk_control_challenge_stops_without_prompt(monkeypatch):
+    prompted = []
+    monkeypatch.setattr(
+        auth_login,
+        "_prompt_risk_control_verification",
+        lambda *args, **kwargs: prompted.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="after one human verification"):
+        _handle_risk_control(
+            object(),
+            "https://www.zhihu.com/account/unhuman?session=test",
+            2,
+        )
+
+    assert prompted == []

@@ -1,6 +1,6 @@
 """zhihu-cli: Zhihu scraping, automation, and analysis toolkit."""
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 from zhihu_cli.content import (
     ContentDownloader,

@@ -49,10 +49,13 @@ zhihu-cli auth paste          # paste a full cURL from browser DevTools
 ```
 
 If Zhihu returns risk-control error `40352`, the CLI opens the verification
-page and explains the next step. Browser verification cookies do not
-automatically move into a separate CLI session, so `zhihu-cli auth paste` is the
-most reliable fallback: copy an authenticated request as cURL from the browser
-after verification and paste it into the CLI.
+page and explains the next step. Run QR login in a user-visible interactive
+terminal: non-interactive execution stops before opening the page, and one
+login session never opens more than one human-verification challenge. Browser
+verification cookies do not automatically move into a separate CLI session,
+so `zhihu-cli auth paste` is the most reliable fallback: deliberately copy an
+authenticated request as cURL from browser DevTools after verification and
+paste it into the CLI.
 
 ### 2. Verify
 
