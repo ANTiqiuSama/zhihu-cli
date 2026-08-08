@@ -17,6 +17,7 @@ from zhihu_cli.commands.download import register_download
 from zhihu_cli.commands.draft import register_draft
 from zhihu_cli.commands.interact import register_interact
 from zhihu_cli.commands.listen import register_listen
+from zhihu_cli.commands.official import register_official
 from zhihu_cli.commands.people import register_people
 from zhihu_cli.commands.profile import register_profile
 from zhihu_cli.commands.publish import register_publish
@@ -40,7 +41,7 @@ def _configure_standard_streams() -> None:
 
 
 @click.group()
-@click.version_option(version="0.2.2", prog_name="zhihu-cli")
+@click.version_option(version="0.3.0", prog_name="zhihu-cli")
 def main() -> None:
     """zhihu-cli — Zhihu scraping, automation, and analysis toolkit.
 
@@ -63,6 +64,7 @@ register_draft(main)
 register_download(main)
 register_interact(main)
 register_listen(main)
+register_official(main)
 register_people(main)
 register_profile(main)
 register_publish(main)
