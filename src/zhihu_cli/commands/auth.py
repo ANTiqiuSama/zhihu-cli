@@ -6,7 +6,6 @@ from pathlib import Path
 
 import click
 
-from zhihu_cli.content.handlers import get_user_agent
 from zhihu_cli.content.handlers.cache_manager import cache_manager
 from zhihu_cli.content.handlers.captcha import detect_captcha, get_captcha_info, handle_captcha, parse_redirect
 from zhihu_cli.content.handlers.requests import reload_session, session
@@ -83,7 +82,14 @@ def register_auth(main_group) -> None:
         help="Cookie header text. If omitted, ZHIHU_COOKIE or a hidden prompt is used.",
     )
     @click.option("--profile", "-p", "profile_name", default=None, help="Save to a named profile")
-    def auth_cookie(cookie_text: str | None, profile_name: str | None) -> None:
+    @click.option(
+        "--browser",
+        type=click.Choice(["auto", "edge", "chrome"], case_sensitive=False),
+        default="auto",
+        show_default=True,
+        help="Browser identity associated with this Cookie",
+    )
+    def auth_cookie(cookie_text: str | None, profile_name: str | None, browser: str) -> None:
         """Import a Cookie header directly and persist it as a profile."""
         if profile_name and profile_name.startswith("_"):
             error("Profile names starting with '_' are reserved for internal use.")
@@ -103,10 +109,9 @@ def register_auth(main_group) -> None:
             error("Cookie must contain z_c0. Copy a complete Cookie header from an authenticated Zhihu request.")
             raise SystemExit(1)
 
-        user_agent = get_user_agent() or (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
-        )
+        from zhihu_cli.content.handlers.auth_login import _browser_identity
+
+        _, user_agent, _ = _browser_identity(browser)
         headers = {"Cookie": cookie_text.strip(), "User-Agent": user_agent}
         cache_manager.save_headers(headers, profile_name=profile_name)
         active = cache_manager.get_active_profile() or "default"
@@ -122,7 +127,14 @@ def register_auth(main_group) -> None:
         help="Save the QR image to this path (default: ~/.zhihu-cli/login_qrcode.png)",
     )
     @click.option("--open-browser/--no-browser", default=True, help="Open risk-control verification in a browser")
-    def auth_login(profile_name: str | None, qr_path: Path | None, open_browser: bool) -> None:
+    @click.option(
+        "--browser",
+        type=click.Choice(["auto", "edge", "chrome"], case_sensitive=False),
+        default="auto",
+        show_default=True,
+        help="Browser identity and verification-page target",
+    )
+    def auth_login(profile_name: str | None, qr_path: Path | None, open_browser: bool, browser: str) -> None:
         """Login to Zhihu via QR code. Scan with the Zhihu App to authenticate.
 
         Displays a QR code in the terminal. Open the Zhihu App, go to
@@ -139,7 +151,7 @@ def register_auth(main_group) -> None:
 
         info("Starting QR code login...")
         try:
-            headers = qr_login(qr_path=qr_path, open_browser=open_browser)
+            headers = qr_login(qr_path=qr_path, open_browser=open_browser, browser=browser)
         except RuntimeError as e:
             error(f"{e}")
             raise SystemExit(1)

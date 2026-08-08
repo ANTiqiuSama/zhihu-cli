@@ -4,6 +4,8 @@ The implementation combines curl-cffi browser impersonation and explicit
 risk-control handling with an Agent-friendly QR image written to disk.
 """
 
+import os
+import sys
 import time
 import webbrowser
 from pathlib import Path
@@ -13,12 +15,18 @@ from curl_cffi import requests as curl_requests
 from zhihu_cli.content.handlers import get_user_agent
 from zhihu_cli.content.utils.wait import wait
 
-DESKTOP_USER_AGENT = (
+CHROME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 )
-DESKTOP_SEC_CH_UA = '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"'
+CHROME_SEC_CH_UA = '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"'
+EDGE_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0"
+)
+EDGE_SEC_CH_UA = '"Not:A-Brand";v="99", "Microsoft Edge";v="145", "Chromium";v="145"'
 DESKTOP_SEC_CH_UA_MOBILE = "?0"
 DESKTOP_SEC_CH_UA_PLATFORM = '"Windows"'
+BROWSER_CHOICES = ("auto", "edge", "chrome")
 
 SIGNIN_URL = "https://www.zhihu.com/signin?next=%2F"
 SIGNIN_REFERER = "https://www.zhihu.com/signin"
@@ -29,17 +37,107 @@ ME_URL = "https://www.zhihu.com/api/v4/me"
 HOME_URL = "https://www.zhihu.com/"
 RISK_CONTROL_FALLBACK = "https://www.zhihu.com/account/risk_control/"
 DEFAULT_QR_PATH = Path.home() / ".zhihu-cli" / "login_qrcode.png"
+MAX_RISK_CONTROL_CHALLENGES = 1
 
 RISK_CONTROL_EXIT = object()
 
 
-def _desktop_headers(referer: str | None = None) -> dict[str, str]:
-    ua = get_user_agent() or DESKTOP_USER_AGENT
+def _read_windows_https_progid() -> str | None:
+    """Return the current Windows HTTPS handler ProgId, if available."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+
+        key_path = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+            value, _ = winreg.QueryValueEx(key, "ProgId")
+        return str(value)
+    except (ImportError, OSError):
+        return None
+
+
+def _browser_from_user_agent(user_agent: str) -> str | None:
+    if "Edg/" in user_agent:
+        return "edge"
+    if "Chrome/" in user_agent:
+        return "chrome"
+    return None
+
+
+def _resolve_browser(browser: str = "auto") -> str:
+    """Resolve an explicit or automatic browser choice for login identity."""
+    normalized = browser.lower()
+    if normalized not in BROWSER_CHOICES:
+        raise ValueError(f"Unsupported browser {browser!r}; choose auto, edge, or chrome")
+    if normalized != "auto":
+        return normalized
+
+    configured = get_user_agent() or ""
+    configured_browser = _browser_from_user_agent(configured)
+    if configured_browser:
+        return configured_browser
+
+    progid = (_read_windows_https_progid() or "").lower()
+    if "msedge" in progid:
+        return "edge"
+    if "chrome" in progid:
+        return "chrome"
+    return "chrome"
+
+
+def _browser_identity(browser: str = "auto") -> tuple[str, str, str]:
+    """Return (browser family, User-Agent, sec-ch-ua) for QR login."""
+    normalized = browser.lower()
+    resolved = _resolve_browser(normalized)
+    configured = get_user_agent() if normalized == "auto" else None
+    if resolved == "edge":
+        return resolved, configured or EDGE_USER_AGENT, EDGE_SEC_CH_UA
+    return resolved, configured or CHROME_USER_AGENT, CHROME_SEC_CH_UA
+
+
+def _browser_executable(browser: str) -> Path | None:
+    if sys.platform != "win32":
+        return None
+    roots = [
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("LOCALAPPDATA"),
+    ]
+    relative_paths = {
+        "edge": Path("Microsoft") / "Edge" / "Application" / "msedge.exe",
+        "chrome": Path("Google") / "Chrome" / "Application" / "chrome.exe",
+    }
+    relative = relative_paths[browser]
+    for root in roots:
+        if not root:
+            continue
+        candidate = Path(root) / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _open_browser_url(url: str, browser: str = "auto") -> bool:
+    """Open *url* in the selected browser without a silent explicit-choice fallback."""
+    normalized = browser.lower()
+    resolved = _resolve_browser(normalized)
+    if normalized == "auto":
+        return bool(webbrowser.open(url, new=2))
+
+    executable = _browser_executable(resolved)
+    if executable is None:
+        raise RuntimeError(f"Requested browser '{resolved}' is not installed or could not be located")
+    return bool(webbrowser.BackgroundBrowser(str(executable)).open(url, new=2))
+
+
+def _desktop_headers(referer: str | None = None, *, browser: str = "auto") -> dict[str, str]:
+    _, ua, sec_ch_ua = _browser_identity(browser)
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9",
         "User-Agent": ua,
-        "sec-ch-ua": DESKTOP_SEC_CH_UA,
+        "sec-ch-ua": sec_ch_ua,
         "sec-ch-ua-mobile": DESKTOP_SEC_CH_UA_MOBILE,
         "sec-ch-ua-platform": DESKTOP_SEC_CH_UA_PLATFORM,
     }
@@ -48,8 +146,14 @@ def _desktop_headers(referer: str | None = None) -> dict[str, str]:
     return headers
 
 
-def _login_headers(session: curl_requests.Session, referer: str, *, polling: bool = False) -> dict[str, str]:
-    headers = _desktop_headers(referer)
+def _login_headers(
+    session: curl_requests.Session,
+    referer: str,
+    *,
+    polling: bool = False,
+    browser: str = "auto",
+) -> dict[str, str]:
+    headers = _desktop_headers(referer, browser=browser)
     headers["Origin"] = HOME_URL.rstrip("/")
     headers["x-requested-with"] = "fetch"
     headers["content-type"] = "application/json;charset=UTF-8"
@@ -109,8 +213,15 @@ def _prompt_risk_control_verification(
     redirect_url: str,
     *,
     open_browser: bool = True,
+    browser: str = "auto",
 ) -> None:
     """Prompt the user to complete browser verification, then refresh session cookies."""
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Interactive Zhihu verification is required. Re-run 'zhihu-cli auth login' "
+            "in a user-visible terminal; no verification page was opened."
+        )
+
     print()
     print("=" * 60)
     print("  ⚠️  Zhihu needs to verify your network environment.")
@@ -123,11 +234,11 @@ def _prompt_risk_control_verification(
 
     if open_browser:
         try:
-            opened = webbrowser.open(redirect_url, new=2)
+            opened = _open_browser_url(redirect_url, browser)
             if opened:
-                print("  Opened the verification page in your default browser.")
-        except Exception:
-            pass
+                print(f"  Opened the verification page in {_resolve_browser(browser)}.")
+        except Exception as exc:
+            print(f"  Could not open the requested browser automatically: {exc}")
 
     try:
         input()
@@ -137,7 +248,7 @@ def _prompt_risk_control_verification(
     # After verification, re-visit risk_control page with the session to pick
     # up any new cookies that the verification set.
     try:
-        session.get(redirect_url, headers=_login_headers(session, SIGNIN_REFERER))
+        session.get(redirect_url, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
     except Exception:
         pass
 
@@ -179,6 +290,7 @@ def _handle_risk_control(
     *,
     qr_path: str | Path | None = None,
     open_browser: bool = True,
+    browser: str = "auto",
 ) -> tuple[str, str, float] | None:
     """Handle a risk control challenge during QR polling.
 
@@ -192,18 +304,19 @@ def _handle_risk_control(
         (1-indexed).
     :returns: ``(token, link, deadline)`` if a fresh QR was obtained, or
         ``None``.
-    :raises RuntimeError: If ``risk_control_count > 3``.
+    :raises RuntimeError: If more than one risk-control challenge is encountered.
     """
-    if risk_control_count > 3:
+    if risk_control_count > MAX_RISK_CONTROL_CHALLENGES:
         raise RuntimeError(
-            "Too many risk-control challenges. Zhihu is throttling this network. "
-            "Try again later or use 'zhihu auth paste' instead."
+            "Zhihu risk control remained active after one human verification. "
+            "Stopping without another retry; try again later or use user-supplied "
+            "browser DevTools cURL with 'zhihu auth paste'."
         )
 
-    _prompt_risk_control_verification(session, risk_url, open_browser=open_browser)
+    _prompt_risk_control_verification(session, risk_url, open_browser=open_browser, browser=browser)
 
     # Re-request a fresh QR code after verification
-    resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER))
+    resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
     if resp.status_code != 200:
         return None
 
@@ -227,35 +340,39 @@ def qr_login(
     *,
     qr_path: str | Path | None = None,
     open_browser: bool = True,
+    browser: str = "auto",
 ) -> dict[str, str]:
     """Execute QR code login flow. Returns headers dict suitable for cache_manager.save_headers()."""
 
-    session = curl_requests.Session(impersonate="chrome")
+    resolved_browser, user_agent, _ = _browser_identity(browser)
+    session = curl_requests.Session(impersonate=resolved_browser)
 
     # Step 1: visit signin page to seed initial cookies (d_c0, _xsrf)
-    session.get(SIGNIN_URL, headers=_desktop_headers(SIGNIN_REFERER))
+    session.get(SIGNIN_URL, headers=_desktop_headers(SIGNIN_REFERER, browser=browser))
 
     # Step 2: register device UDID
     try:
-        session.post(UDID_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER))
+        session.post(UDID_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
     except Exception:
         pass
 
     # Step 3: fetch captcha context
     try:
-        session.get(CAPTCHA_URL, headers=_login_headers(session, SIGNIN_REFERER))
+        session.get(CAPTCHA_URL, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
     except Exception:
         pass
 
     # Step 4: request QR code
-    resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER))
+    resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
     data = resp.json()
 
     # Check for risk control before QR code is issued
+    risk_control_count = 0
     risk_url = _detect_risk_control(data)
     if risk_url:
-        _prompt_risk_control_verification(session, risk_url, open_browser=open_browser)
-        resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER))
+        risk_control_count += 1
+        _prompt_risk_control_verification(session, risk_url, open_browser=open_browser, browser=browser)
+        resp = session.post(QRCODE_URL, json={}, headers=_login_headers(session, SIGNIN_REFERER, browser=browser))
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to request QR code after verification: HTTP {resp.status_code}")
         data = resp.json()
@@ -281,14 +398,13 @@ def qr_login(
 
     print("Waiting for scan...")
     scanned_reported = False
-    risk_control_count = 0
     last_poll_error: Exception | None = None
 
     while time.time() < deadline:
         try:
             resp = session.get(
                 f"{QRCODE_URL}/{token}/scan_info",
-                headers=_login_headers(session, SIGNIN_URL, polling=True),
+                headers=_login_headers(session, SIGNIN_URL, polling=True, browser=browser),
             )
 
             scan_info = resp.json() if resp.text else {}
@@ -306,6 +422,7 @@ def qr_login(
                     risk_control_count,
                     qr_path=qr_path,
                     open_browser=open_browser,
+                    browser=browser,
                 )
                 if refreshed:
                     token, link, deadline = refreshed
@@ -326,7 +443,7 @@ def qr_login(
             if result == "success":
                 if not _cookie_value(session, "z_c0"):
                     try:
-                        session.get(ME_URL, headers=_login_headers(session, SIGNIN_URL, polling=True))
+                        session.get(ME_URL, headers=_login_headers(session, SIGNIN_URL, polling=True, browser=browser))
                     except Exception:
                         pass
                 if _cookie_value(session, "z_c0") or scan_info.get("userId"):
@@ -357,7 +474,7 @@ def qr_login(
 
         headers = {
             "Cookie": _cookies_to_header(session),
-            "User-Agent": get_user_agent() or DESKTOP_USER_AGENT,
+            "User-Agent": user_agent,
         }
         return headers
 
