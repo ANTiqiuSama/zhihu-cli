@@ -150,6 +150,25 @@ def test_extract_official_binary_rejects_duplicate_entries(tmp_path):
         )
 
 
+def test_extract_official_skill_rejects_unsafe_paths(tmp_path):
+    archive_path = tmp_path / "zhihu-skill.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("zhihu/SKILL.md", "---\nname: zhihu\ndescription: test\n---\n")
+        archive.writestr(
+            "zhihu/manifest.json",
+            json.dumps({"package": "zhihu-cli-skill", "skill": "zhihu", "version": "0.2.1"}),
+        )
+        archive.writestr("zhihu/scripts/run.ps1", "Write-Output ok\n")
+        archive.writestr("zhihu/../outside.txt", "unsafe")
+
+    with pytest.raises(OfficialCliError, match="unsafe path"):
+        official_module._extract_official_skill(
+            archive_path,
+            tmp_path / "extract",
+            expected_version="0.2.1",
+        )
+
+
 def test_install_official_cli_verifies_and_installs(monkeypatch, tmp_path):
     binary_bytes = b"verified official binary"
     archive_source = tmp_path / "source.zip"
@@ -229,11 +248,87 @@ def test_install_reuses_valid_local_binary_without_network(monkeypatch, tmp_path
     }
 
 
+def test_install_official_skill_verifies_installs_and_adds_windows_bom(monkeypatch, tmp_path):
+    archive_source = tmp_path / "skill-source.zip"
+    package_manifest = {"package": "zhihu-cli-skill", "skill": "zhihu", "version": "0.2.1"}
+    with zipfile.ZipFile(archive_source, "w") as archive:
+        archive.writestr("zhihu/SKILL.md", "---\nname: zhihu\ndescription: official test skill\n---\n")
+        archive.writestr("zhihu/manifest.json", json.dumps(package_manifest))
+        archive.writestr("zhihu/scripts/run.ps1", "# 中文注释\nWrite-Output ok\n")
+        archive.writestr("zhihu/scripts/setup.ps1", "# 安装\nWrite-Output setup\n")
+    archive_bytes = archive_source.read_bytes()
+    archive_hash = hashlib.sha256(archive_bytes).hexdigest()
+    release_manifest = {
+        "schema_version": 1,
+        "skill": {
+            "latest_version": "0.2.1",
+            "url": "https://developer-cdn.zhihu.com/releases/zhihu-cli-skill.zip",
+            "sha256": archive_hash,
+            "size": len(archive_bytes),
+        },
+    }
+    skills_home = tmp_path / ".codex" / "skills"
+    monkeypatch.setattr(official_module, "codex_skills_home", lambda: skills_home)
+    monkeypatch.setattr(official_module, "_fetch_manifest", lambda url: release_manifest)
+    monkeypatch.setattr(official_module, "_download_bytes", lambda url, max_bytes: archive_bytes)
+    monkeypatch.setattr(official_module.platform, "system", lambda: "Windows")
+
+    result = official_module.install_official_skill()
+
+    installed = skills_home / "zhihu"
+    assert result == {
+        "ok": True,
+        "installed": True,
+        "reused_skill": False,
+        "version": "0.2.1",
+        "skill_path": str(installed.resolve()),
+        "archive_sha256": archive_hash,
+        "windows_powershell_utf8_compatible": True,
+    }
+    assert (installed / "SKILL.md").is_file()
+    assert (installed / "scripts" / "run.ps1").read_bytes().startswith(b"\xef\xbb\xbf")
+    assert (installed / "scripts" / "setup.ps1").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_install_official_skill_reuses_valid_package_without_network(monkeypatch, tmp_path):
+    installed = tmp_path / "skills" / "zhihu"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text("---\nname: zhihu\ndescription: test\n---\n", encoding="utf-8")
+    (installed / "manifest.json").write_text(
+        json.dumps({"package": "zhihu-cli-skill", "skill": "zhihu", "version": "0.2.1"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(official_module, "codex_skills_home", lambda: tmp_path / "skills")
+    monkeypatch.setattr(
+        official_module,
+        "_fetch_manifest",
+        lambda url: (_ for _ in ()).throw(AssertionError("network should not be used")),
+    )
+
+    assert official_module.install_official_skill() == {
+        "ok": True,
+        "installed": False,
+        "reused_skill": True,
+        "version": "0.2.1",
+        "skill_path": str(installed.resolve()),
+    }
+
+
 def test_install_command_emits_json(monkeypatch):
     payload = {"ok": True, "installed": False, "version": "0.2.0"}
     monkeypatch.setattr(official_command, "install_official_cli", lambda force=False: payload)
 
     result = CliRunner().invoke(_build_cli(), ["official", "install"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == payload
+
+
+def test_skill_install_command_emits_json(monkeypatch):
+    payload = {"ok": True, "installed": True, "version": "0.2.1"}
+    monkeypatch.setattr(official_command, "install_official_skill", lambda force=False: payload)
+
+    result = CliRunner().invoke(_build_cli(), ["official", "skill", "install", "--force"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == payload

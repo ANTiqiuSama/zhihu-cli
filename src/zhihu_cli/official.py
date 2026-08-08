@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -22,6 +23,7 @@ OFFICIAL_MANIFEST_URL = "https://developer-cdn.zhihu.com/zhihu-cli/releases/stab
 _OFFICIAL_CDN_HOST = "developer-cdn.zhihu.com"
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 128 * 1024 * 1024
+_MAX_SKILL_BYTES = 16 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -74,6 +76,23 @@ def official_binary_name(platform_key: str | None = None) -> str:
     """Return the platform-specific official executable name."""
     key = platform_key or official_platform_key()
     return "zhihu-cli.exe" if key.startswith("windows-") else "zhihu-cli"
+
+
+def codex_skills_home() -> Path:
+    """Return the user-level Codex skills directory."""
+    codex_home = os.environ.get("CODEX_HOME")
+    root = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    return root / "skills"
+
+
+def resolve_official_skill(*, required: bool = True) -> Path | None:
+    """Return the installed official Zhihu Skill directory."""
+    destination = codex_skills_home() / "zhihu"
+    if destination.is_dir() and (destination / "SKILL.md").is_file():
+        return destination.resolve()
+    if required:
+        raise OfficialCliError("Zhihu's official Codex Skill is not installed. Run `zhihu-cli official skill install`.")
+    return None
 
 
 def resolve_official_binary(*, required: bool = True) -> Path | None:
@@ -167,14 +186,195 @@ def _artifact_for_platform(manifest: dict[str, Any], platform_key: str) -> tuple
     return version, url, size, sha256
 
 
-def _write_verified_artifact(url: str, destination: Path, *, expected_size: int, expected_sha256: str) -> None:
-    data = _download_bytes(url, max_bytes=_MAX_ARTIFACT_BYTES)
+def _skill_artifact(manifest: dict[str, Any]) -> tuple[str, str, int, str]:
+    try:
+        skill = manifest["skill"]
+        version = str(skill["latest_version"])
+        url = str(skill["url"])
+        sha256 = str(skill["sha256"]).lower()
+        size = int(skill["size"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OfficialCliError("Official release manifest lacks a valid Skill artifact.") from exc
+
+    _validated_https_url(url, expected_host=_OFFICIAL_CDN_HOST)
+    if not url.lower().endswith(".zip"):
+        raise OfficialCliError("Official Skill artifact must be a ZIP archive.")
+    if not _SHA256_RE.fullmatch(sha256) or not 0 < size <= _MAX_SKILL_BYTES:
+        raise OfficialCliError("Official Skill integrity fields are invalid.")
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version):
+        raise OfficialCliError("Official Skill version is invalid.")
+    return version, url, size, sha256
+
+
+def _write_verified_artifact(
+    url: str,
+    destination: Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+    max_bytes: int = _MAX_ARTIFACT_BYTES,
+) -> None:
+    data = _download_bytes(url, max_bytes=max_bytes)
     if len(data) != expected_size:
         raise OfficialCliError("Official artifact size does not match the release manifest.")
     digest = hashlib.sha256(data).hexdigest()
     if digest != expected_sha256:
         raise OfficialCliError("Official artifact SHA-256 does not match the release manifest.")
     destination.write_bytes(data)
+
+
+def _extract_official_skill(archive_path: Path, destination_root: Path, *, expected_version: str) -> Path:
+    """Extract one verified `zhihu/` Skill tree without trusting ZIP paths."""
+    seen: set[str] = set()
+    total_size = 0
+    with zipfile.ZipFile(archive_path) as archive:
+        entries = archive.infolist()
+        if not entries:
+            raise OfficialCliError("Official Skill archive is empty.")
+        for entry in entries:
+            path = PurePosixPath(entry.filename.replace("\\", "/"))
+            if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != "zhihu":
+                raise OfficialCliError("Official Skill archive contains an unsafe path.")
+            normalized = path.as_posix().rstrip("/")
+            if normalized in seen:
+                raise OfficialCliError("Official Skill archive contains duplicate paths.")
+            seen.add(normalized)
+            mode = entry.external_attr >> 16
+            if mode and stat.S_ISLNK(mode):
+                raise OfficialCliError("Official Skill archive must not contain symbolic links.")
+            if entry.file_size < 0 or entry.file_size > _MAX_SKILL_BYTES:
+                raise OfficialCliError("Official Skill archive entry is too large.")
+            total_size += entry.file_size
+            if total_size > _MAX_SKILL_BYTES:
+                raise OfficialCliError("Official Skill archive expands beyond the allowed size.")
+
+        required = {"zhihu/SKILL.md", "zhihu/manifest.json", "zhihu/scripts/run.ps1"}
+        if not required.issubset(seen):
+            raise OfficialCliError("Official Skill archive is missing required files.")
+
+        for entry in entries:
+            path = PurePosixPath(entry.filename.replace("\\", "/"))
+            target = destination_root.joinpath(*path.parts)
+            if entry.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(entry) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+
+    skill_dir = destination_root / "zhihu"
+    try:
+        package_manifest = json.loads((skill_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OfficialCliError("Official Skill package manifest is invalid.") from exc
+    if (
+        package_manifest.get("package") != "zhihu-cli-skill"
+        or package_manifest.get("skill") != "zhihu"
+        or str(package_manifest.get("version")) != expected_version
+    ):
+        raise OfficialCliError("Official Skill package identity does not match the release manifest.")
+    return skill_dir
+
+
+def _add_utf8_bom_to_powershell_scripts(skill_dir: Path) -> bool:
+    """Make UTF-8 scripts readable by Windows PowerShell 5.1 without changing text."""
+    changed = False
+    for script in (skill_dir / "scripts").glob("*.ps1"):
+        raw = script.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            continue
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise OfficialCliError(f"Official Skill script is not valid UTF-8: {script.name}") from exc
+        script.write_bytes(b"\xef\xbb\xbf" + raw)
+        changed = True
+    return changed
+
+
+def _installed_skill_version(destination: Path) -> str | None:
+    try:
+        package_manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if package_manifest.get("package") != "zhihu-cli-skill" or package_manifest.get("skill") != "zhihu":
+        return None
+    version = str(package_manifest.get("version", ""))
+    return version if re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version) else None
+
+
+def _replace_skill_directory(staged_skill: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise OfficialCliError("Refusing to replace a symbolic-link Skill destination.")
+
+    with tempfile.TemporaryDirectory(prefix=".zhihu-skill-backup-", dir=destination.parent) as backup_dir:
+        backup = Path(backup_dir) / "zhihu"
+        had_existing = destination.exists()
+        if had_existing:
+            os.replace(destination, backup)
+        try:
+            os.replace(staged_skill, destination)
+        except OSError:
+            if had_existing and backup.exists() and not destination.exists():
+                os.replace(backup, destination)
+            raise
+
+
+def install_official_skill(
+    *,
+    force: bool = False,
+    manifest_url: str = OFFICIAL_MANIFEST_URL,
+) -> dict[str, Any]:
+    """Install the verified official Zhihu Skill into the user-level Codex directory."""
+    _validated_https_url(manifest_url, expected_host=_OFFICIAL_CDN_HOST)
+    destination = codex_skills_home() / "zhihu"
+    existing_version = _installed_skill_version(destination)
+    if existing_version and not force:
+        return {
+            "ok": True,
+            "installed": False,
+            "reused_skill": True,
+            "version": existing_version,
+            "skill_path": str(destination.resolve()),
+        }
+    if destination.exists() and not force:
+        raise OfficialCliError(
+            "A non-official or invalid `zhihu` Skill already exists. "
+            "Review it before using `zhihu-cli official skill install --force`."
+        )
+
+    manifest = _fetch_manifest(manifest_url)
+    version, artifact_url, expected_size, expected_sha256 = _skill_artifact(manifest)
+    skills_home = codex_skills_home()
+    skills_home.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".zhihu-skill-install-", dir=skills_home) as temp_dir:
+        temp_root = Path(temp_dir)
+        archive_path = temp_root / "zhihu-cli-skill.zip"
+        extraction_root = temp_root / "extracted"
+        extraction_root.mkdir()
+        _write_verified_artifact(
+            artifact_url,
+            archive_path,
+            expected_size=expected_size,
+            expected_sha256=expected_sha256,
+            max_bytes=_MAX_SKILL_BYTES,
+        )
+        staged_skill = _extract_official_skill(archive_path, extraction_root, expected_version=version)
+        powershell_compatibility = False
+        if platform.system().lower() == "windows":
+            powershell_compatibility = _add_utf8_bom_to_powershell_scripts(staged_skill)
+        _replace_skill_directory(staged_skill, destination)
+
+    return {
+        "ok": True,
+        "installed": True,
+        "reused_skill": False,
+        "version": version,
+        "skill_path": str(destination.resolve()),
+        "archive_sha256": expected_sha256,
+        "windows_powershell_utf8_compatible": powershell_compatibility,
+    }
 
 
 def _safe_archive_member(name: str, binary_name: str) -> bool:

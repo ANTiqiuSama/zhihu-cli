@@ -41,6 +41,10 @@ zhihu-cli official install
 zhihu-cli official version
 zhihu-cli official upgrade --check  # explicit remote update check
 
+# Install Zhihu's verified official Skill for future Codex sessions
+zhihu-cli official skill install
+zhihu-cli official skill path
+
 # Optional extras
 python -m pip install ".[nlp]"          # word clouds, clustering
 python -m pip install ".[creator]"      # income charts, trends
@@ -106,6 +110,28 @@ The official and web credentials are independent. `official auth status`
 checks an Open Platform Access Secret; the existing `auth status` checks cached
 web headers and profiles.
 
+### 4. Enable Codex routing
+
+```powershell
+zhihu-cli official skill install
+zhihu-cli official skill path
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  "$env:USERPROFILE\.codex\skills\zhihu\scripts\run.ps1" status
+```
+
+The installer downloads the official Skill from Zhihu's CDN, verifies the
+release-manifest size and SHA-256, validates the package identity, and installs
+it under the user-level Codex skills directory. On Windows it adds a UTF-8 BOM
+to the packaged PowerShell scripts so Windows PowerShell 5.1 can parse their
+Chinese text without changing command or authentication behavior. Start a new
+Codex turn after installation so skill discovery refreshes.
+
+Codex should route search, hot lists, Zhida, personal content, followees, and
+favorites through the official `zhihu` Skill. Complete public-answer body reads
+remain a separate community-web operation and must not treat a search summary
+as complete text. Credentials remain in the official OS keychain and are never
+copied into the repository or Skill files.
+
 ---
 
 ## Official CLI diff
@@ -113,7 +139,7 @@ web headers and profiles.
 This project does not fork or modify Zhihu's official binary. It adds a secure
 provider bridge and keeps the broader community client alongside it.
 
-| Capability | Zhihu official CLI 0.2.0 | This hybrid CLI 0.3.0 |
+| Capability | Zhihu official CLI 0.2.0 | This hybrid CLI 0.3.1 |
 |---|---|---|
 | Zhihu search | Official API, 1–10 summarized results | Same official command via `official search zhihu`; legacy typed web search also retained |
 | Global search | Official API, 1–20 results, realtime/static/all indexes | Same via `official search global` |
@@ -127,7 +153,7 @@ provider bridge and keeps the broader community client alongside it.
 | Creator/NLP analysis | Not provided | Retained analysis and extension tools |
 | Multi-account web profiles | Not provided | Retained profile switching |
 | Authentication | Open Platform Access Secret in OS keychain | Official credentials stay in the official keychain; web Cookie/cURL profiles remain separate |
-| Installation | Official Skill installs a closed binary | `official install` consumes the official manifest, pins the CDN host, rejects redirects, verifies size/SHA-256 and binary-reported version |
+| Installation | Official Skill installs a closed binary | `official install` verifies the binary; `official skill install` verifies and installs the official Codex Skill without vendoring either artifact |
 | Platforms in current official manifest | Windows AMD64; macOS AMD64/ARM64 | Official provider on those platforms; community Python commands retain their existing portability |
 | License/source | Official binary is not vendored here | Community wrapper code remains MIT; official artifacts stay external |
 

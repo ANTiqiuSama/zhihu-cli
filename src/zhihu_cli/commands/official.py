@@ -8,7 +8,13 @@ from pathlib import Path
 
 import click
 
-from zhihu_cli.official import OfficialCliError, install_official_cli, resolve_official_binary
+from zhihu_cli.official import (
+    OfficialCliError,
+    install_official_cli,
+    install_official_skill,
+    resolve_official_binary,
+    resolve_official_skill,
+)
 from zhihu_cli.output import echo, error, info
 
 _HELP = """Zhihu official Open Platform provider.
@@ -16,6 +22,8 @@ _HELP = """Zhihu official Open Platform provider.
 Internal commands:
   zhihu-cli official install [--force]  Download and verify the official binary
   zhihu-cli official path               Print the resolved official binary path
+  zhihu-cli official skill install      Install the verified official Codex Skill
+  zhihu-cli official skill path         Print the installed Codex Skill path
 
 All other arguments are forwarded unchanged to the official CLI:
   zhihu-cli official capabilities --pretty
@@ -84,6 +92,37 @@ def register_official(main_group: click.Group) -> None:
                 raise click.exceptions.Exit(1) from exc
             click.echo(str(binary))
             return
+
+        if action == "skill":
+            if len(official_args) == 1 or official_args[1] in {"--help", "-h"}:
+                echo("Usage:\n  zhihu-cli official skill install [--force]\n  zhihu-cli official skill path")
+                return
+            skill_action = official_args[1]
+            if skill_action == "install":
+                unknown = [arg for arg in official_args[2:] if arg != "--force"]
+                if unknown:
+                    error(f"Unknown official skill install option: {unknown[0]}")
+                    raise click.exceptions.Exit(2)
+                try:
+                    result = install_official_skill(force="--force" in official_args[2:])
+                except OfficialCliError as exc:
+                    error(str(exc))
+                    raise click.exceptions.Exit(1) from exc
+                click.echo(json.dumps(result, ensure_ascii=False))
+                return
+            if skill_action == "path":
+                if len(official_args) != 2:
+                    error("Usage: zhihu-cli official skill path")
+                    raise click.exceptions.Exit(2)
+                try:
+                    skill = resolve_official_skill()
+                except OfficialCliError as exc:
+                    error(str(exc))
+                    raise click.exceptions.Exit(1) from exc
+                click.echo(str(skill))
+                return
+            error(f"Unknown official skill action: {skill_action}")
+            raise click.exceptions.Exit(2)
 
         if _blocks_secret_argument(official_args):
             error(

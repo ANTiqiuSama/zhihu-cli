@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zhihu-cli"
-version = "0.3.0"
+version = "0.3.1"
 description = "A hybrid Zhihu CLI with an official Open Platform provider and full web automation tools."
 readme = "README.md"
 license = "MIT"
